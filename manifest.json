@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "X Article Snap",
+  "short_name": "ArticleSnap",
+  "description": "推特文章高清截图 & 剪藏神器 — 一键截图、转 Markdown、纯净阅读模式",
+  "version": "1.0.0",
+  "icons": {
+    "16": "icons/xas_logo.png",
+    "48": "icons/xas_logo.png",
+    "128": "icons/xas_logo.png",
+    "512": "icons/xas_logo.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/xas_logo.png",
+      "48": "icons/xas_logo.png",
+      "128": "icons/xas_logo.png"
+    },
+    "default_title": "X Article Snap"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["libs/readability.js", "libs/turndown.js", "content/content.js"],
+      "css": ["content/article-mode.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "tabs",
+    "offscreen",
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://twitter.com/*"
+  ]
+}

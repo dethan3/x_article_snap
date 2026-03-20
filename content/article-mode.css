@@ -1,0 +1,21 @@
+/* X Article Snap — injected on article pages */
+body.xas-article-mode [data-testid="primaryColumn"] > div > div:first-child,
+body.xas-article-mode [aria-label="Home timeline"],
+body.xas-article-mode [data-testid="sidebarColumn"],
+body.xas-article-mode [data-testid="TopNavBar"],
+body.xas-article-mode nav[aria-label="Primary"],
+body.xas-article-mode [role="banner"],
+body.xas-article-mode [data-testid="ScrollSnap-SwipeableList"],
+body.xas-article-mode [data-testid="tweet"],
+body.xas-article-mode [data-testid="reply"],
+body.xas-article-mode [data-testid="inline_reply_offscreen"],
+body.xas-article-mode [aria-label="Trending"],
+body.xas-article-mode [data-testid="DMDrawer"],
+body.xas-article-mode [data-testid="BottomBar"] {
+  display: none !important;
+}
+
+body.xas-clean-article [data-testid="tweetPhoto"] ~ *,
+body.xas-clean-article [data-testid="reply"] {
+  display: none !important;
+}

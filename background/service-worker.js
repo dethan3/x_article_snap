@@ -40,9 +40,9 @@ async function sendMessageToContent(tabId, msg) {
   }
 }
 
-async function downloadScreenshot(dataUrl, filename) {
+async function downloadScreenshot(url, filename) {
   return new Promise(resolve => {
-    chrome.downloads.download({ url: dataUrl, filename, saveAs: false }, downloadId => {
+    chrome.downloads.download({ url, filename, saveAs: false }, downloadId => {
       if (chrome.runtime.lastError || !downloadId) {
         resolve({
           ok: false,
@@ -51,7 +51,6 @@ async function downloadScreenshot(dataUrl, filename) {
         return;
       }
 
-      notifyPopup({ action: 'screenshotProgress', pct: 100, text: '完成！' });
       resolve({ ok: true, downloadId });
     });
   });
@@ -80,7 +79,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab) return;
-  const opts = await chrome.storage.local.get({ retina: true, watermark: false, watermarkText: '' });
+  const opts = await chrome.storage.local.get({ retina: true, longMode: true, watermark: false, watermarkText: '' });
   if (info.menuItemId === 'xas-screenshot') {
     handleScreenshot(tab.id, { ...opts, mode: 'png' });
   } else if (info.menuItemId === 'xas-markdown') {
@@ -115,8 +114,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'downloadScreenshot') {
-    const { dataUrl, filename } = msg;
-    downloadScreenshot(dataUrl, filename).then(sendResponse);
+    const downloadUrl = msg.url || msg.dataUrl;
+    if (!downloadUrl) {
+      sendResponse({ ok: false, error: '下载地址为空' });
+      return false;
+    }
+    downloadScreenshot(downloadUrl, msg.filename).then(sendResponse);
     return true;
   }
 

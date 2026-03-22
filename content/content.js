@@ -285,6 +285,8 @@
     const origScrollY = window.scrollY;
     const origOverflow = document.documentElement.style.overflow;
     const restoreHidden = hideElementsForCapture();
+    let captureSessionId = null;
+    let stitchingStarted = false;
 
     try {
       document.documentElement.style.overflow = 'hidden';
@@ -358,7 +360,12 @@
         }
       }
 
-      const captures = [];
+      captureSessionId = createCaptureSessionId();
+      const sessionResp = await sendToOffscreen({ action: 'resetCaptureSession', captureSessionId });
+      if (sessionResp?.error) {
+        throw new Error(sessionResp.error || '初始化截图缓存失败');
+      }
+
       let scrollY = 0;
       const step = viewH;
       const steps = Math.ceil(totalH / step);
@@ -385,13 +392,20 @@
         if (!resp?.dataUrl) throw new Error('截图返回为空');
 
         const actualScrollY = Math.min(scrollY, Math.max(0, totalH - viewH));
-        captures.push({
-          dataUrl: resp.dataUrl,
-          scrollY: actualScrollY,
-          viewH,
-          viewW,
-          totalH
+        const frameResp = await sendToOffscreen({
+          action: 'appendCaptureFrame',
+          captureSessionId,
+          capture: {
+            dataUrl: resp.dataUrl,
+            scrollY: actualScrollY,
+            viewH,
+            viewW,
+            totalH
+          }
         });
+        if (frameResp?.error) {
+          throw new Error(frameResp.error || '缓存截图帧失败');
+        }
 
         scrollY += step;
         if (scrollY >= totalH) break;
@@ -399,9 +413,11 @@
 
       reportProgress(85, '拼接图像...');
 
-      chrome.runtime.sendMessage({
+      stitchingStarted = true;
+
+      sendToOffscreen({
         action: 'stitchScreenshots',
-        captures,
+        captureSessionId,
         totalH,
         viewW,
         dpr,
@@ -409,8 +425,18 @@
         cropRight,
         options,
         title: document.title?.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || 'screenshot'
-      }).catch(() => {});
+      }).then(resp => {
+        if (resp?.error) {
+          chrome.runtime.sendMessage({ action: 'screenshotError', error: resp.error }).catch(() => {});
+        }
+      }).catch(e => {
+        sendToOffscreen({ action: 'clearCaptureSession', captureSessionId }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'screenshotError', error: e?.message || '拼接失败' }).catch(() => {});
+      });
     } finally {
+      if (captureSessionId && !stitchingStarted) {
+        sendToOffscreen({ action: 'clearCaptureSession', captureSessionId }).catch(() => {});
+      }
       captureAborted = false;
       restoreHidden();
       document.documentElement.style.overflow = origOverflow;
@@ -464,6 +490,10 @@
 
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  function createCaptureSessionId() {
+    return `xas-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
   /* ── Message listener ── */

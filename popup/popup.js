@@ -7,7 +7,7 @@ let settings = {};
 async function loadSettings() {
   return new Promise(resolve => {
     chrome.storage.local.get(
-      { watermark: false, watermarkText: '', retina: true },
+      { watermark: false, watermarkText: '', retina: true, longMode: true },
       data => { resolve(data); }
     );
   });
@@ -126,6 +126,7 @@ async function init() {
 function applySettingsToUI() {
   $('optWatermark').checked = settings.watermark || false;
   $('optRetina').checked = settings.retina !== false;
+  $('optLongMode').checked = settings.longMode !== false;
   $('watermarkText').value = settings.watermarkText || '';
   $('watermarkRow').style.display = settings.watermark ? 'block' : 'none';
 }
@@ -159,6 +160,7 @@ $('btnScreenshot').addEventListener('click', async () => {
       tabId: currentTab.id,
       options: {
         retina: settings.retina !== false,
+        longMode: settings.longMode !== false,
         watermark: settings.watermark,
         watermarkText: settings.watermarkText,
         mode: 'png'
@@ -248,6 +250,11 @@ $('optRetina').addEventListener('change', e => {
   saveSettings({ retina: settings.retina });
 });
 
+$('optLongMode').addEventListener('change', e => {
+  settings.longMode = e.target.checked;
+  saveSettings({ longMode: settings.longMode });
+});
+
 $('watermarkText').addEventListener('input', e => {
   settings.watermarkText = e.target.value;
   saveSettings({ watermarkText: settings.watermarkText });
@@ -257,11 +264,13 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'screenshotProgress') {
     setProgress(msg.pct, msg.text);
     if (msg.pct >= 100) {
+      const finalText = msg.text || '';
+      const toastMsg = finalText.includes('张图片') ? `截图已保存！${finalText}` : '截图已保存！';
       setTimeout(() => {
         setProgress(-1);
         setAllButtonsDisabled(false);
         setStatus('ok');
-        toast('截图已保存！', 'success');
+        toast(toastMsg, 'success');
       }, 800);
     }
   }

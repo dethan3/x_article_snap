@@ -1,83 +1,121 @@
-# X Article Snap — 推特文章高清截图 & 剪藏神器
+# X Article Snap
 
-Chrome 扩展（Manifest V3），适用于 **x.com / twitter.com**。
+Chrome extension for turning X / Twitter posts into cleaner, share-ready captures.
 
-## 功能
+[简体中文](./README.zh-CN.md)
 
-| 功能 | 说明 |
-|------|------|
-| 📖 纯阅读模式 | 一键跳转 `/article/` 并注入 CSS 隐藏侧栏/广告/回复 |
-| 📷 高清全页截图 | 滚动拼接，支持 2x Retina，输出含日期的 PNG |
-| 📄 导出 PDF | 调用浏览器打印 API，最小边距 |
-| 🖼 长图模式 | 同截图，适合微信/小红书分享 |
-| 📝 转 Markdown | Readability.js 提取 + Turndown 转换，复制剪贴板 + 下载 .md |
-| 🔴 悬浮球 | article 页面显示可拖动相机图标（可关闭） |
-| 💧 水印 | 可自定义水印文字 |
-| 🌙 深色/浅色 | 截图时可切换背景主题 |
+## What It Does
 
-## 快捷键
+X Article Snap focuses on three workflows:
 
-| 快捷键 | 功能 |
-|--------|------|
-| `Alt+Shift+A` | 高清截图 |
-| `Alt+Shift+R` | 切换阅读模式 |
+- Clean reading mode for `status` pages by switching into X's `/article/` view.
+- High-resolution screenshot export with a share footer.
+- Markdown extraction for lightweight clipping and note-taking.
 
-## 安装步骤
+This project currently targets Chrome Manifest V3 and runs without a build step.
 
-1. 打开 Chrome，访问 `chrome://extensions/`
-2. 右上角开启 **开发者模式**
-3. 点击 **加载已解压的扩展程序**
-4. 选择本目录（`ArticleSnap/`）
-5. 扩展图标出现在工具栏中
+## Current Features
 
-## 文件结构
+### Reading Mode
 
-```
-ArticleSnap/
-├── manifest.json           # Manifest V3
+- Switch a standard `x.com/.../status/...` page into `/article/`.
+- Reduce sidebars and visual noise for a tighter reading layout.
+- Keep screenshot export compatible with both `status` and `article` pages.
+
+### Share-Ready Screenshots
+
+- Full-page capture pipeline with automatic scrolling and offscreen stitching.
+- `2x` high-resolution export toggle.
+- Tighter crop on article pages, aligned to the actual article content area.
+- Footer appended to the bottom of the final image with:
+  - original post link
+  - placeholder share brand: `x_share`
+  - extension logo
+  - optional QR code for the original post URL
+- Optional watermark overlay.
+
+### Smart Share Truncation
+
+- When content runs longer than roughly two screens, the export switches to a share mode.
+- The capture stops early instead of generating an excessively tall image.
+- The bottom of the content fades out with a white mask before the footer.
+- The footer still carries the original source link and optional QR code.
+
+### Markdown Export
+
+- Extract article content with Readability.
+- Convert HTML to Markdown with Turndown.
+- Download a `.md` file.
+- Attempt clipboard copy when the page context allows it.
+
+### Convenience
+
+- Popup controls for reading mode, screenshot, Markdown, watermark, QR code, and resolution.
+- Right-click context menu entries for screenshot, Markdown export, and reading mode.
+- Storage-backed settings persistence.
+
+## Installation
+
+1. Open `chrome://extensions/`.
+2. Enable `Developer mode`.
+3. Click `Load unpacked`.
+4. Select this project folder.
+5. Pin the extension if you want quick access from the toolbar.
+
+## Usage
+
+1. Open a post on `x.com` or `twitter.com`.
+2. Click the extension icon.
+3. Choose one of the main actions:
+   - `Article Mode`
+   - `High-Res Screenshot`
+   - `Markdown`
+4. Adjust optional settings such as watermark, QR code, and `2x` export before capturing.
+
+## Capture Behavior
+
+- On standard `status` pages, the capture focuses on the main post instead of including the reply feed.
+- On `article` pages, the crop is aligned to the article content width rather than the entire column.
+- The share footer always uses the original post URL, even when the current page is `/article/`.
+
+## Project Structure
+
+```text
+x_article_snap/
+├── manifest.json
 ├── background/
-│   └── service-worker.js   # 截图调度、右键菜单、快捷键
+│   └── service-worker.js
 ├── content/
-│   ├── content.js          # 注入脚本：阅读模式、滚动截图、MD提取
-│   └── article-mode.css    # 阅读模式 CSS
-├── offscreen/
-│   ├── offscreen.html      # 离屏文档
-│   └── offscreen.js        # Canvas 拼接 + 水印
-├── popup/
-│   ├── popup.html          # 弹窗 UI
-│   ├── popup.css           # 深色主题样式
-│   └── popup.js            # 弹窗逻辑
+│   ├── article-mode.css
+│   └── content.js
+├── icons/
+│   └── xas_logo.png
 ├── libs/
-│   ├── readability.js      # Mozilla Readability
-│   └── turndown.js         # HTML → Markdown
-└── icons/
-    ├── icon16.png
-    ├── icon48.png
-    ├── icon128.png
-    └── icon512.png
+│   ├── qrcodegen.js
+│   ├── readability.js
+│   └── turndown.js
+├── offscreen/
+│   ├── offscreen.html
+│   └── offscreen.js
+└── popup/
+    ├── popup.css
+    ├── popup.html
+    └── popup.js
 ```
 
-## 使用说明
+## Permissions
 
-### 阅读模式
-- 在 `x.com/用户名/status/ID` 页面点击「切换纯阅读模式」
-- 自动跳转到 `/article/` 版本并隐藏所有干扰元素
+| Permission | Purpose |
+| --- | --- |
+| `activeTab` | Access the current tab when the user invokes the extension |
+| `scripting` | Inject or reinject content scripts when needed |
+| `downloads` | Save screenshots and Markdown files |
+| `tabs` | Capture the visible tab during screenshot export |
+| `offscreen` | Stitch screenshots in an offscreen document |
+| `storage` | Persist user preferences |
+| `contextMenus` | Add right-click actions on X / Twitter pages |
 
-### 截图
-- 点击「高清截图」→ 扩展自动滚动全页并拼接
-- 可在设置中开启水印、深色主题
+## Notes
 
-### Markdown
-- 点击「转 Markdown」→ 内容自动复制到剪贴板 + 下载 `.md` 文件
-
-## 权限说明
-
-| 权限 | 用途 |
-|------|------|
-| `activeTab` | 获取当前页面信息 |
-| `scripting` | 注入内容脚本 |
-| `downloads` | 保存截图/MD文件 |
-| `tabs` | 截图时访问标签页 |
-| `offscreen` | 离屏 Canvas 拼接 |
-| `storage` | 保存用户设置 |
-| `contextMenus` | 右键菜单 |
+- This README only documents features that are currently implemented.
+- The footer brand is intentionally a placeholder for the upcoming share-oriented product direction.

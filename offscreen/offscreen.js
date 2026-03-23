@@ -4,6 +4,10 @@ const PNG_IDAT_CHUNK_SIZE = 1_048_576;
 const PNG_STREAM_BATCH_BYTES = 1_048_576;
 const TEXT_ENCODER = new TextEncoder();
 const CRC_TABLE = buildCrcTable();
+const SHARE_BRAND_NAME = 'x_share';
+const SHARE_BRAND_LOGO_URL = chrome.runtime.getURL('icons/xas_logo.png');
+
+let shareBrandLogoPromise = null;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'resetCaptureSession') {
@@ -33,29 +37,49 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.action === 'stitchScreenshots') {
+    let captures;
     try {
-      const captures = resolveCaptures(msg);
-      stitchAndDownload({ ...msg, captures }).then(sendResponse).catch(e => {
-        sendResponse({ error: e.message });
-      }).finally(() => {
-        if (msg.captureSessionId) {
-          captureStore.delete(msg.captureSessionId);
-        }
-      });
+      captures = resolveCaptures(msg);
     } catch (e) {
       if (msg.captureSessionId) {
         captureStore.delete(msg.captureSessionId);
       }
       sendResponse({ error: e.message });
+      return false;
     }
-    return true;
+
+    stitchAndDownload({ ...msg, captures }).catch(e => {
+      chrome.runtime.sendMessage({
+        action: 'screenshotError',
+        error: e.message
+      }).catch(() => {});
+    }).finally(() => {
+      if (msg.captureSessionId) {
+        captureStore.delete(msg.captureSessionId);
+      }
+    });
+
+    sendResponse({ ok: true, started: true });
+    return false;
   }
 });
 
 const MAX_CANVAS_EDGE_PX = 8192;
 const MAX_CANVAS_AREA_PX = 33_554_432; // 32 MP keeps us below common Chrome/GPU limits.
 
-async function stitchAndDownload({ captures, totalH, viewW, dpr, cropLeft, cropRight, options, title }) {
+async function stitchAndDownload({
+  captures,
+  totalH,
+  viewW,
+  dpr,
+  cropLeft,
+  cropRight,
+  options,
+  title,
+  sourceUrl,
+  isTruncatedCapture = false,
+  fadeHeightCss = 0
+}) {
   const reportProgress = (pct, text) => {
     chrome.runtime.sendMessage({ action: 'screenshotProgress', pct, text }).catch(() => {});
   };
@@ -92,6 +116,10 @@ async function stitchAndDownload({ captures, totalH, viewW, dpr, cropLeft, cropR
       longMode
     });
     const { scale, canvasW, maxCanvasHeightPx, tileHeightCss } = plan;
+    const footerConfig = getShareFooterConfig(canvasW, sourceUrl, options);
+    const fadeHeightPx = isTruncatedCapture
+      ? Math.max(1, Math.min(Math.ceil(fadeHeightCss * scale), Math.ceil(totalH * scale)))
+      : 0;
 
     if (!longMode) {
       if (totalH * scale > maxCanvasHeightPx) {
@@ -121,9 +149,20 @@ async function stitchAndDownload({ captures, totalH, viewW, dpr, cropLeft, cropR
       if (options?.watermark && options?.watermarkText) {
         drawWatermark(ctx, options.watermarkText, canvasW, canvasH);
       }
+      if (fadeHeightPx > 0) {
+        applyBottomFade(ctx, canvasW, canvasH, fadeHeightPx);
+      }
 
       reportProgress(98, '生成文件...');
-      await exportAndDownload(canvas, `${title}_${date}.png`);
+      const exportCanvas = footerConfig
+        ? await createCanvasWithShareFooter({
+            baseCanvas: canvas,
+            canvasW,
+            footerConfig,
+            sourceUrl
+          })
+        : canvas;
+      await exportAndDownload(exportCanvas, `${title}_${date}.png`);
       canvas.width = 1;
       canvas.height = 1;
       reportProgress(100, '完成！');
@@ -143,7 +182,11 @@ async function stitchAndDownload({ captures, totalH, viewW, dpr, cropLeft, cropR
         cropW,
         canvasW,
         tileHeightCss,
+        footerConfig,
+        isTruncatedCapture,
+        fadeHeightPx,
         options,
+        sourceUrl,
         title,
         date,
         reportProgress
@@ -160,7 +203,11 @@ async function stitchAndDownload({ captures, totalH, viewW, dpr, cropLeft, cropR
         cropW,
         canvasW,
         tileHeightCss,
+        footerConfig,
+        isTruncatedCapture,
+        fadeHeightPx,
         options,
+        sourceUrl,
         title,
         date,
         reportProgress
@@ -222,6 +269,70 @@ function createRenderPlan({ cropW, totalH, requestedScale, longMode }) {
   };
 }
 
+function getShareFooterConfig(canvasW, sourceUrl, options) {
+  if (!sourceUrl) return null;
+
+  const qrEnabled = options?.includeQrCode === true;
+  const paddingX = Math.max(24, Math.round(canvasW * 0.05));
+  const paddingY = Math.max(16, Math.round(canvasW * 0.028));
+  const logoSize = Math.max(24, Math.min(34, Math.round(canvasW * 0.05)));
+  const brandFontSize = Math.max(18, Math.round(canvasW * 0.032));
+  const metaFontSize = Math.max(12, Math.round(canvasW * 0.021));
+  const linkFontSize = Math.max(13, Math.round(canvasW * 0.023));
+  const qrSize = qrEnabled
+    ? Math.max(72, Math.min(108, Math.round(canvasW * 0.16)))
+    : 0;
+  const footerHeight = Math.max(
+    qrEnabled ? qrSize + paddingY * 2.4 + logoSize : 88,
+    Math.round(paddingY * 2.4 + logoSize + linkFontSize)
+  );
+
+  return {
+    footerHeight,
+    paddingX,
+    paddingY,
+    logoSize,
+    brandFontSize,
+    metaFontSize,
+    linkFontSize,
+    qrEnabled,
+    qrSize
+  };
+}
+
+async function createCanvasWithShareFooter({ baseCanvas, canvasW, footerConfig, sourceUrl }) {
+  if (!footerConfig) return baseCanvas;
+
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = canvasW;
+  exportCanvas.height = baseCanvas.height + footerConfig.footerHeight;
+  const exportCtx = exportCanvas.getContext('2d');
+  if (!exportCtx) {
+    throw new Error('无法创建 footer 画布上下文');
+  }
+
+  exportCtx.drawImage(baseCanvas, 0, 0);
+  await drawShareFooter(exportCtx, {
+    canvasW,
+    footerTop: baseCanvas.height,
+    footerConfig,
+    sourceUrl
+  });
+
+  return exportCanvas;
+}
+
+async function renderShareFooterToCanvas({ canvas, ctx, canvasW, footerConfig, sourceUrl }) {
+  canvas.width = canvasW;
+  canvas.height = footerConfig.footerHeight;
+  await drawShareFooter(ctx, {
+    canvasW,
+    footerTop: 0,
+    footerConfig,
+    sourceUrl
+  });
+}
+
 async function exportSplitLongMode({
   canvas,
   ctx,
@@ -233,7 +344,11 @@ async function exportSplitLongMode({
   cropW,
   canvasW,
   tileHeightCss,
+  footerConfig,
+  isTruncatedCapture,
+  fadeHeightPx,
   options,
+  sourceUrl,
   title,
   date,
   reportProgress
@@ -255,13 +370,25 @@ async function exportSplitLongMode({
       options
     });
 
+    if (isTruncatedCapture && s === slicePlans.length - 1 && fadeHeightPx > 0) {
+      applyBottomFade(ctx, canvasW, canvas.height, Math.min(fadeHeightPx, canvas.height));
+    }
+
     reportProgress(
       90 + Math.floor(((s + 0.5) / slicePlans.length) * 8),
       slicePlans.length > 1 ? `生成第 ${s + 1}/${slicePlans.length} 张...` : '生成文件...'
     );
 
     const suffix = slicePlans.length > 1 ? `_${s + 1}of${slicePlans.length}` : '';
-    await exportAndDownload(canvas, `${title}${suffix}_${date}.png`);
+    const exportCanvas = s === slicePlans.length - 1 && footerConfig
+      ? await createCanvasWithShareFooter({
+          baseCanvas: canvas,
+          canvasW,
+          footerConfig,
+          sourceUrl
+        })
+      : canvas;
+    await exportAndDownload(exportCanvas, `${title}${suffix}_${date}.png`);
   }
 }
 
@@ -276,13 +403,18 @@ async function exportStreamingLongPng({
   cropW,
   canvasW,
   tileHeightCss,
+  footerConfig,
+  isTruncatedCapture,
+  fadeHeightPx,
   options,
+  sourceUrl,
   title,
   date,
   reportProgress
 }) {
   const slicePlans = buildSlicePlans(totalH, tileHeightCss, scale);
-  const finalHeight = slicePlans[slicePlans.length - 1]?.pixelEnd || Math.max(1, Math.round(totalH * scale));
+  const contentHeight = slicePlans[slicePlans.length - 1]?.pixelEnd || Math.max(1, Math.round(totalH * scale));
+  const finalHeight = contentHeight + (footerConfig?.footerHeight || 0);
   const compressionStream = new CompressionStream('deflate');
   const writer = compressionStream.writable.getWriter();
   const compressedPromise = new Response(compressionStream.readable).arrayBuffer();
@@ -304,7 +436,22 @@ async function exportStreamingLongPng({
       options
     });
 
+    if (isTruncatedCapture && s === slicePlans.length - 1 && fadeHeightPx > 0) {
+      applyBottomFade(ctx, canvasW, canvas.height, Math.min(fadeHeightPx, canvas.height));
+    }
+
     reportProgress(94 + Math.floor(((s + 0.5) / slicePlans.length) * 3), `编码第 ${s + 1}/${slicePlans.length} 段...`);
+    await writeCanvasToPngStream(writer, ctx, canvasW, canvas.height);
+  }
+
+  if (footerConfig) {
+    await renderShareFooterToCanvas({
+      canvas,
+      ctx,
+      canvasW,
+      footerConfig,
+      sourceUrl
+    });
     await writeCanvasToPngStream(writer, ctx, canvasW, canvas.height);
   }
 
@@ -381,6 +528,24 @@ async function renderSliceToCanvas({
   if (options?.watermark && options?.watermarkText) {
     drawWatermark(ctx, options.watermarkText, canvasW, canvas.height, slice.pixelStart);
   }
+}
+
+function applyBottomFade(ctx, width, height, fadeHeightPx) {
+  const safeFadeHeight = Math.max(0, Math.min(fadeHeightPx || 0, height));
+  if (safeFadeHeight <= 0) return;
+
+  const fadeTop = Math.max(0, height - safeFadeHeight);
+  const gradient = ctx.createLinearGradient(0, fadeTop, 0, height);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
+  gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.82)');
+  gradient.addColorStop(1, '#ffffff');
+
+  ctx.save();
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, fadeTop, width, safeFadeHeight);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, height - 2, width, 2);
+  ctx.restore();
 }
 
 async function writeCanvasToPngStream(writer, ctx, width, height) {
@@ -544,6 +709,191 @@ function buildCrcTable() {
   }
 
   return table;
+}
+
+async function drawShareFooter(ctx, { canvasW, footerTop, footerConfig, sourceUrl }) {
+  const {
+    footerHeight,
+    paddingX,
+    paddingY,
+    logoSize,
+    brandFontSize,
+    metaFontSize,
+    linkFontSize,
+    qrEnabled,
+    qrSize
+  } = footerConfig;
+
+  const brandGap = Math.max(10, Math.round(logoSize * 0.35));
+  const brandBottom = footerTop + footerHeight - paddingY;
+  const brandBaselineY = brandBottom - Math.max(1, Math.round((logoSize - brandFontSize) * 0.2));
+
+  ctx.font = `700 ${brandFontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  const brandWidth = ctx.measureText(SHARE_BRAND_NAME).width;
+  const brandX = canvasW - paddingX - brandWidth;
+  const logoX = brandX - brandGap - logoSize;
+  const logoY = brandBottom - logoSize;
+  const qrX = canvasW - paddingX - qrSize;
+  const qrY = footerTop + paddingY;
+
+  const linkCenterY = qrEnabled
+    ? footerTop + Math.round(footerHeight * 0.5)
+    : footerTop + Math.round(footerHeight * 0.56);
+  const label = '原帖 · ';
+  const compactUrl = formatFooterUrl(sourceUrl);
+  const linkRightLimit = Math.max(
+    paddingX + 120,
+    (qrEnabled ? qrX : logoX) - Math.max(24, Math.round(paddingX * 0.8))
+  );
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, footerTop, canvasW, footerHeight);
+
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(0, footerTop, canvasW, 1);
+
+  ctx.textBaseline = 'middle';
+  ctx.font = `600 ${metaFontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.fillStyle = '#6b7280';
+  ctx.fillText(label, paddingX, linkCenterY);
+
+  const labelWidth = ctx.measureText(label).width;
+  const availableUrlWidth = Math.max(80, linkRightLimit - (paddingX + labelWidth));
+  ctx.font = `500 ${linkFontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.fillStyle = '#374151';
+  ctx.fillText(
+    truncateTextToWidth(ctx, compactUrl, availableUrlWidth),
+    paddingX + labelWidth,
+    linkCenterY
+  );
+
+  if (qrEnabled) {
+    drawShareQrCode(ctx, {
+      x: qrX,
+      y: qrY,
+      size: qrSize,
+      url: sourceUrl
+    });
+  }
+
+  await drawShareBrandLogo(ctx, {
+    x: logoX,
+    y: logoY,
+    size: logoSize
+  });
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#111827';
+  ctx.font = `700 ${brandFontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.fillText(SHARE_BRAND_NAME, brandX, brandBaselineY);
+}
+
+function drawShareQrCode(ctx, { x, y, size, url }) {
+  if (!url || !globalThis.qrcodegen?.QrCode) return;
+
+  const quietZone = 4;
+  const qr = globalThis.qrcodegen.QrCode.encodeText(
+    url,
+    globalThis.qrcodegen.QrCode.Ecc.MEDIUM
+  );
+  const moduleCount = qr.size + quietZone * 2;
+  const moduleSize = size / moduleCount;
+
+  ctx.save();
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x, y, size, size);
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+  ctx.fillStyle = '#111827';
+
+  for (let moduleY = 0; moduleY < qr.size; moduleY++) {
+    for (let moduleX = 0; moduleX < qr.size; moduleX++) {
+      if (!qr.getModule(moduleX, moduleY)) continue;
+      const drawX = x + (moduleX + quietZone) * moduleSize;
+      const drawY = y + (moduleY + quietZone) * moduleSize;
+      const startX = Math.round(drawX);
+      const startY = Math.round(drawY);
+      const endX = Math.round(x + (moduleX + quietZone + 1) * moduleSize);
+      const endY = Math.round(y + (moduleY + quietZone + 1) * moduleSize);
+      ctx.fillRect(startX, startY, Math.max(1, endX - startX), Math.max(1, endY - startY));
+    }
+  }
+
+  ctx.restore();
+}
+
+async function drawShareBrandLogo(ctx, { x, y, size }) {
+  const logo = await loadShareBrandLogo();
+
+  ctx.save();
+  drawRoundedRect(ctx, x, y, size, size, Math.max(10, Math.round(size * 0.22)));
+  ctx.clip();
+  if (logo) {
+    ctx.drawImage(logo, x, y, size, size);
+  } else {
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fillRect(x, y, size, size);
+    ctx.fillStyle = '#4b5563';
+    ctx.font = `700 ${Math.max(16, Math.round(size * 0.42))}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('X', x + size / 2, y + size / 2 + 1);
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+  }
+  ctx.restore();
+}
+
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function truncateTextToWidth(ctx, text, maxWidth) {
+  const ellipsis = '...';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+
+  let output = text;
+  while (output && ctx.measureText(output + ellipsis).width > maxWidth) {
+    output = output.slice(0, -1);
+  }
+  return output + ellipsis;
+}
+
+function formatFooterUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.host.replace(/^www\./, '');
+    const statusMatch = parsed.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+
+    if (statusMatch) {
+      const username = statusMatch[1];
+      const statusId = statusMatch[2];
+      const compactId = statusId.length > 12
+        ? `${statusId.slice(0, 6)}...${statusId.slice(-4)}`
+        : statusId;
+      return `${host}/${username}/status/${compactId}`;
+    }
+
+    const plainPath = parsed.pathname.replace(/\/$/, '');
+    return `${host}${plainPath || ''}`;
+  } catch (_) {
+    return (url || '').replace(/^https?:\/\//, '');
+  }
+}
+
+function loadShareBrandLogo() {
+  if (!shareBrandLogoPromise) {
+    shareBrandLogoPromise = loadImage(SHARE_BRAND_LOGO_URL).catch(() => null);
+  }
+  return shareBrandLogoPromise;
 }
 
 function drawWatermark(ctx, text, w, h, offsetY = 0) {

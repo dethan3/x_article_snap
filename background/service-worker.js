@@ -79,7 +79,13 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab) return;
-  const opts = await chrome.storage.local.get({ retina: true, longMode: true, watermark: false, watermarkText: '' });
+  const opts = await chrome.storage.local.get({
+    retina: true,
+    longMode: true,
+    includeQrCode: false,
+    watermark: false,
+    watermarkText: ''
+  });
   if (info.menuItemId === 'xas-screenshot') {
     handleScreenshot(tab.id, { ...opts, mode: 'png' });
   } else if (info.menuItemId === 'xas-markdown') {
@@ -119,18 +125,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: '下载地址为空' });
       return false;
     }
-    downloadScreenshot(downloadUrl, msg.filename).then(sendResponse);
+    downloadScreenshot(downloadUrl, msg.filename)
+      .then(sendResponse)
+      .catch(e => {
+        sendResponse({
+          ok: false,
+          error: e?.message || '下载失败'
+        });
+      });
     return true;
   }
 
   if (msg.action === 'screenshotProgress') {
-    notifyPopup(msg);
     sendResponse({ ok: true });
     return false;
   }
 
   if (msg.action === 'screenshotError') {
-    notifyPopup(msg);
     closeOffscreen();
     sendResponse({ ok: true });
     return false;

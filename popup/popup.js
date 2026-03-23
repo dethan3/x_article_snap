@@ -3,11 +3,13 @@ const CONTENT_SCRIPT_FILES = ['libs/readability.js', 'libs/turndown.js', 'conten
 
 let currentTab = null;
 let settings = {};
+let captureResultHandled = false;
+let captureToastTimer = null;
 
 async function loadSettings() {
   return new Promise(resolve => {
     chrome.storage.local.get(
-      { watermark: false, watermarkText: '', retina: true, longMode: true },
+      { watermark: false, watermarkText: '', retina: true, longMode: true, includeQrCode: false },
       data => { resolve(data); }
     );
   });
@@ -45,6 +47,14 @@ function setProgress(pct, text) {
 function setStatus(state) {
   const dot = $('statusDot');
   dot.className = 'status-dot status-' + state;
+}
+
+function resetCaptureUiState() {
+  captureResultHandled = false;
+  if (captureToastTimer) {
+    clearTimeout(captureToastTimer);
+    captureToastTimer = null;
+  }
 }
 
 async function getCurrentTab() {
@@ -127,6 +137,7 @@ function applySettingsToUI() {
   $('optWatermark').checked = settings.watermark || false;
   $('optRetina').checked = settings.retina !== false;
   $('optLongMode').checked = settings.longMode !== false;
+  $('optQrCode').checked = settings.includeQrCode === true;
   $('watermarkText').value = settings.watermarkText || '';
   $('watermarkRow').style.display = settings.watermark ? 'block' : 'none';
 }
@@ -151,6 +162,7 @@ $('btnArticleMode').addEventListener('click', async () => {
 
 $('btnScreenshot').addEventListener('click', async () => {
   if (!currentTab) return;
+  resetCaptureUiState();
   setAllButtonsDisabled(true);
   setStatus('busy');
   setProgress(0, '准备截图...');
@@ -161,6 +173,7 @@ $('btnScreenshot').addEventListener('click', async () => {
       options: {
         retina: settings.retina !== false,
         longMode: settings.longMode !== false,
+        includeQrCode: settings.includeQrCode === true,
         watermark: settings.watermark,
         watermarkText: settings.watermarkText,
         mode: 'png'
@@ -203,6 +216,8 @@ $('btnMarkdown').addEventListener('click', async () => {
 
 $('btnCancel').addEventListener('click', async () => {
   if (!currentTab) return;
+  resetCaptureUiState();
+  captureResultHandled = true;
   try {
     await sendToContent({ action: 'cancelCapture' });
   } catch (_) {}
@@ -210,33 +225,6 @@ $('btnCancel').addEventListener('click', async () => {
   setAllButtonsDisabled(false);
   setStatus('ok');
   toast('截图已取消', 'info');
-});
-
-$('btnMarkdown').addEventListener('click', async () => {
-  if (!currentTab) return;
-  setAllButtonsDisabled(true);
-  setStatus('busy');
-  try {
-    const result = await sendToContent({ action: 'extractMarkdown' });
-    if (result?.success) {
-      if (result.markdown) {
-        try {
-          await navigator.clipboard.writeText(result.markdown);
-          toast('✓ Markdown 已复制到剪贴板并下载', 'success');
-        } catch (_) {
-          toast('✓ Markdown 已下载（剪贴板写入需页面聚焦）', 'success');
-        }
-      } else {
-        toast('✓ Markdown 已下载', 'success');
-      }
-    } else {
-      toast(result?.error || 'Markdown 提取失败', 'error');
-    }
-  } catch (e) {
-    toast('提取失败: ' + e.message, 'error');
-  }
-  setAllButtonsDisabled(false);
-  setStatus('ok');
 });
 
 $('optWatermark').addEventListener('change', e => {
@@ -255,6 +243,11 @@ $('optLongMode').addEventListener('change', e => {
   saveSettings({ longMode: settings.longMode });
 });
 
+$('optQrCode').addEventListener('change', e => {
+  settings.includeQrCode = e.target.checked;
+  saveSettings({ includeQrCode: settings.includeQrCode });
+});
+
 $('watermarkText').addEventListener('input', e => {
   settings.watermarkText = e.target.value;
   saveSettings({ watermarkText: settings.watermarkText });
@@ -263,18 +256,25 @@ $('watermarkText').addEventListener('input', e => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'screenshotProgress') {
     setProgress(msg.pct, msg.text);
-    if (msg.pct >= 100) {
+    if (msg.pct >= 100 && !captureResultHandled) {
+      captureResultHandled = true;
       const finalText = msg.text || '';
       const toastMsg = finalText.includes('张图片') ? `截图已保存！${finalText}` : '截图已保存！';
-      setTimeout(() => {
+      captureToastTimer = setTimeout(() => {
         setProgress(-1);
         setAllButtonsDisabled(false);
         setStatus('ok');
         toast(toastMsg, 'success');
+        captureToastTimer = null;
       }, 800);
     }
   }
-  if (msg.action === 'screenshotError') {
+  if (msg.action === 'screenshotError' && !captureResultHandled) {
+    captureResultHandled = true;
+    if (captureToastTimer) {
+      clearTimeout(captureToastTimer);
+      captureToastTimer = null;
+    }
     toast(msg.error || '截图失败', 'error');
     setProgress(-1);
     setAllButtonsDisabled(false);

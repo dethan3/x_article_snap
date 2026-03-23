@@ -44,6 +44,37 @@
     return null;
   }
 
+  function parseArticleUrl(url) {
+    if (!url) return null;
+    try {
+      const { pathname } = new URL(url, location.origin);
+      const m = pathname.match(/^\/([^/]+)\/article\/(\d+)/);
+      if (m) return { username: m[1], statusId: m[2] };
+    } catch (_) {}
+    return null;
+  }
+
+  function getSourceStatusUrl() {
+    const articleInfo = parseArticleUrl(location.href);
+    if (articleInfo?.username) {
+      return `${location.origin}/${articleInfo.username}/status/${articleInfo.statusId}`;
+    }
+
+    const statusInfo = parseStatusUrl(location.href);
+    if (statusInfo?.username) {
+      return `${location.origin}/${statusInfo.username}/status/${statusInfo.statusId}`;
+    }
+    if (statusInfo?.statusId) {
+      return findCanonicalStatusUrl(statusInfo.statusId) || location.href;
+    }
+
+    return (
+      document.querySelector('link[rel="canonical"]')?.href ||
+      document.querySelector('meta[property="og:url"]')?.content ||
+      location.href
+    );
+  }
+
   function enterArticleMode() {
     const articleUrl = getArticleUrl();
     if (articleUrl) {
@@ -189,6 +220,247 @@
   }
 
   let captureAborted = false;
+  const CAPTURE_HORIZONTAL_GUTTER_PX = 8;
+  const CAPTURE_MIN_TEXT_RECT_WIDTH = 24;
+  const CAPTURE_MIN_MEDIA_RECT_WIDTH = 80;
+  const SHARE_CAPTURE_MAX_SCREENS = 2;
+  const SHARE_FADE_HEIGHT_RATIO = 0.38;
+  const SHARE_FADE_HEIGHT_MIN_PX = 120;
+  const SHARE_FADE_HEIGHT_MAX_PX = 220;
+
+  function toPlainRect(rect) {
+    if (!rect) return null;
+    const width = Number(rect.width) || 0;
+    const height = Number(rect.height) || 0;
+    if (width < 1 || height < 1) return null;
+    return {
+      top: Number(rect.top) || 0,
+      right: Number(rect.right) || 0,
+      bottom: Number(rect.bottom) || 0,
+      left: Number(rect.left) || 0,
+      width,
+      height
+    };
+  }
+
+  function mergeRects(rects) {
+    if (!rects.length) return null;
+    let top = rects[0].top;
+    let right = rects[0].right;
+    let bottom = rects[0].bottom;
+    let left = rects[0].left;
+
+    for (let i = 1; i < rects.length; i++) {
+      const rect = rects[i];
+      top = Math.min(top, rect.top);
+      right = Math.max(right, rect.right);
+      bottom = Math.max(bottom, rect.bottom);
+      left = Math.min(left, rect.left);
+    }
+
+    return {
+      top,
+      right,
+      bottom,
+      left,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top)
+    };
+  }
+
+  function getElementInnerRect(el) {
+    if (!el) return null;
+    const rect = toPlainRect(el.getBoundingClientRect());
+    if (!rect) return null;
+    const style = window.getComputedStyle(el);
+    const paddingLeft = Math.max(0, parseFloat(style.paddingLeft) || 0);
+    const paddingRight = Math.max(0, parseFloat(style.paddingRight) || 0);
+    const left = rect.left + paddingLeft;
+    const right = rect.right - paddingRight;
+    if (right - left < 100) return rect;
+    return {
+      top: rect.top,
+      right,
+      bottom: rect.bottom,
+      left,
+      width: Math.max(0, right - left),
+      height: rect.height
+    };
+  }
+
+  function isElementVisibleForCapture(el) {
+    if (!el || !document.contains(el)) return false;
+    const style = window.getComputedStyle(el);
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.opacity === '0'
+    ) {
+      return false;
+    }
+    return !!toPlainRect(el.getBoundingClientRect());
+  }
+
+  function isIgnoredCaptureNode(el) {
+    return !!el?.closest(
+      [
+        '[data-testid="TopNavBar"]',
+        '[data-testid="BottomBar"]',
+        '[data-testid="DMDrawer"]',
+        '[data-testid="ScrollSnap-SwipeableList"]',
+        '[data-testid="sidebarColumn"]',
+        'nav[aria-label="Primary"]',
+        'header[role="banner"]',
+        'aside[role="complementary"]',
+        '[role="complementary"]',
+        '[aria-hidden="true"]',
+        'script',
+        'style',
+        'noscript'
+      ].join(',')
+    );
+  }
+
+  function collectTextNodeRects(root) {
+    const rects = [];
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (!node.textContent?.trim()) return NodeFilter.FILTER_REJECT;
+          const parent = node.parentElement;
+          if (!parent || isIgnoredCaptureNode(parent) || !isElementVisibleForCapture(parent)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    let node = walker.nextNode();
+    while (node) {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = toPlainRect(range.getBoundingClientRect());
+      range.detach?.();
+      if (
+        rect &&
+        rect.width >= CAPTURE_MIN_TEXT_RECT_WIDTH &&
+        rect.height >= 8
+      ) {
+        rects.push(rect);
+      }
+      node = walker.nextNode();
+    }
+
+    return rects;
+  }
+
+  function collectMediaRects(root) {
+    const rects = [];
+    const mediaNodes = root.querySelectorAll('img, video, canvas, svg, figure, blockquote, pre, table');
+    mediaNodes.forEach(node => {
+      if (isIgnoredCaptureNode(node) || !isElementVisibleForCapture(node)) return;
+      const rect = toPlainRect(node.getBoundingClientRect());
+      if (
+        rect &&
+        rect.width >= CAPTURE_MIN_MEDIA_RECT_WIDTH &&
+        rect.height >= 12
+      ) {
+        rects.push(rect);
+      }
+    });
+    return rects;
+  }
+
+  function getArticleCaptureBounds(root, viewW) {
+    if (!root) return null;
+    const preciseRects = [
+      ...collectTextNodeRects(root),
+      ...collectMediaRects(root)
+    ];
+    const preciseBounds = mergeRects(preciseRects);
+    const shellRect = findArticleShellRect(root, preciseBounds);
+    const targetBounds = mergeRects(
+      [shellRect, preciseBounds].filter(Boolean)
+    );
+    if (!targetBounds || targetBounds.width < 180) return null;
+
+    return {
+      cropLeft: Math.max(0, Math.floor(targetBounds.left - CAPTURE_HORIZONTAL_GUTTER_PX)),
+      cropRight: Math.min(viewW, Math.ceil(targetBounds.right + CAPTURE_HORIZONTAL_GUTTER_PX))
+    };
+  }
+
+  function containsHorizontally(containerRect, contentRect) {
+    return (
+      containerRect.left <= contentRect.left + 4 &&
+      containerRect.right >= contentRect.right - 4
+    );
+  }
+
+  function findArticleShellRect(root, preciseBounds) {
+    if (!root || !preciseBounds) return null;
+    const rootRect = getElementInnerRect(root);
+    if (!rootRect) return null;
+
+    const candidates = root.querySelectorAll('article, [role="article"], section, div');
+    let best = null;
+
+    candidates.forEach(node => {
+      if (isIgnoredCaptureNode(node) || !isElementVisibleForCapture(node)) return;
+      const rect = getElementInnerRect(node);
+      if (!rect) return;
+      if (rect.height < 120 || rect.width < 220) return;
+      if (rect.width >= rootRect.width - 8) return;
+      if (rect.width <= preciseBounds.width + 24) return;
+      if (rect.top > preciseBounds.top + 32) return;
+      if (rect.bottom < preciseBounds.bottom - 32) return;
+      if (!containsHorizontally(rect, preciseBounds)) return;
+
+      if (
+        !best ||
+        rect.width < best.width ||
+        (Math.abs(rect.width - best.width) < 4 && rect.height > best.height)
+      ) {
+        best = rect;
+      }
+    });
+
+    return best;
+  }
+
+  function getDefaultCaptureBounds(root, viewW) {
+    if (!root) {
+      return { cropLeft: 0, cropRight: viewW };
+    }
+    const rect = toPlainRect(root.getBoundingClientRect());
+    if (rect && rect.width > 100 && rect.width < viewW * 0.9) {
+      return {
+        cropLeft: Math.max(0, Math.floor(rect.left)),
+        cropRight: Math.min(viewW, Math.ceil(rect.right))
+      };
+    }
+    return { cropLeft: 0, cropRight: viewW };
+  }
+
+  function resolveCaptureBounds({ root, viewW, isArticlePage }) {
+    if (isArticlePage) {
+      const articleBounds = getArticleCaptureBounds(root, viewW);
+      if (articleBounds && articleBounds.cropRight - articleBounds.cropLeft > 180) {
+        return articleBounds;
+      }
+    }
+    return getDefaultCaptureBounds(root, viewW);
+  }
+
+  function getShareFadeHeightCss(viewH) {
+    return Math.max(
+      SHARE_FADE_HEIGHT_MIN_PX,
+      Math.min(SHARE_FADE_HEIGHT_MAX_PX, Math.round(viewH * SHARE_FADE_HEIGHT_RATIO))
+    );
+  }
 
   /* ── Markdown Extraction ── */
   async function extractMarkdown() {
@@ -302,20 +574,14 @@
         await sleep(60);
       }
 
-      /* crop to article column */
-      const colSel = '[data-testid="primaryColumn"], main[role="main"] > div, main[role="main"]';
       const col = document.querySelector('[data-testid="primaryColumn"]') ||
                   document.querySelector('main[role="main"] > div') ||
                   document.querySelector('main[role="main"]');
-      let cropLeft = 0, cropRight = viewW;
-      if (col) {
-        const r = col.getBoundingClientRect();
-        /* Only use bounds if they look sane (>100px wide and <90% of viewport) */
-        if (r.width > 100 && r.width < viewW * 0.9) {
-          cropLeft = Math.max(0, Math.floor(r.left));
-          cropRight = Math.min(viewW, Math.ceil(r.right));
-        }
-      }
+      const { cropLeft, cropRight } = resolveCaptureBounds({
+        root: col,
+        viewW,
+        isArticlePage
+      });
       reportProgress(9, `裁剪: ${cropLeft}–${cropRight}px`);
 
       /* determine capture height */
@@ -358,6 +624,14 @@
           /* 精确截到推文底部，不加额外边距 */
           totalH = Math.min(totalH, artBottom + 20);
         }
+      }
+
+      const maxShareCaptureHeight = viewH * SHARE_CAPTURE_MAX_SCREENS;
+      const isTruncatedCapture = totalH > maxShareCaptureHeight;
+      const fadeHeightCss = getShareFadeHeightCss(viewH);
+      if (isTruncatedCapture) {
+        totalH = maxShareCaptureHeight;
+        reportProgress(9, '内容较长，已切换为分享截断模式');
       }
 
       captureSessionId = createCaptureSessionId();
@@ -413,9 +687,7 @@
 
       reportProgress(85, '拼接图像...');
 
-      stitchingStarted = true;
-
-      sendToOffscreen({
+      const stitchResp = await sendToOffscreen({
         action: 'stitchScreenshots',
         captureSessionId,
         totalH,
@@ -423,16 +695,16 @@
         dpr,
         cropLeft,
         cropRight,
+        isTruncatedCapture,
+        fadeHeightCss,
         options,
+        sourceUrl: getSourceStatusUrl(),
         title: document.title?.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || 'screenshot'
-      }).then(resp => {
-        if (resp?.error) {
-          chrome.runtime.sendMessage({ action: 'screenshotError', error: resp.error }).catch(() => {});
-        }
-      }).catch(e => {
-        sendToOffscreen({ action: 'clearCaptureSession', captureSessionId }).catch(() => {});
-        chrome.runtime.sendMessage({ action: 'screenshotError', error: e?.message || '拼接失败' }).catch(() => {});
       });
+      if (stitchResp?.error) {
+        throw new Error(stitchResp.error || '拼接失败');
+      }
+      stitchingStarted = true;
     } finally {
       if (captureSessionId && !stitchingStarted) {
         sendToOffscreen({ action: 'clearCaptureSession', captureSessionId }).catch(() => {});
@@ -498,26 +770,42 @@
 
   /* ── Message listener ── */
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    const handle = async () => {
-      switch (msg.action) {
-        case 'ping':               return { ok: true };
-        case 'enterArticleMode':   enterArticleMode();  return { ok: true };
-        case 'exitArticleMode':    exitArticleMode();   return { ok: true };
-        case 'extractMarkdown':    return await extractMarkdown();
-        case 'cancelCapture':
-          captureAborted = true;
-          return { ok: true };
-        case 'startScrollCapture':
-          startScrollCapture(msg.options || {}).catch(e => {
-            chrome.runtime.sendMessage({ action: 'screenshotError', error: e.message });
+    switch (msg.action) {
+      case 'ping':
+        sendResponse({ ok: true });
+        return false;
+      case 'enterArticleMode':
+        sendResponse({ ok: true });
+        enterArticleMode();
+        return false;
+      case 'exitArticleMode':
+        sendResponse({ ok: true });
+        exitArticleMode();
+        return false;
+      case 'extractMarkdown':
+        extractMarkdown()
+          .then(sendResponse)
+          .catch(error => {
+            sendResponse({
+              success: false,
+              error: error?.message || 'Markdown 提取失败'
+            });
           });
-          return { ok: true, started: true };
-        default:
-          return { ok: false, error: 'unknown action' };
-      }
-    };
-    handle().then(sendResponse);
-    return true;
+        return true;
+      case 'cancelCapture':
+        captureAborted = true;
+        sendResponse({ ok: true });
+        return false;
+      case 'startScrollCapture':
+        startScrollCapture(msg.options || {}).catch(e => {
+          chrome.runtime.sendMessage({ action: 'screenshotError', error: e.message }).catch(() => {});
+        });
+        sendResponse({ ok: true, started: true });
+        return false;
+      default:
+        sendResponse({ ok: false, error: 'unknown action' });
+        return false;
+    }
   });
 
   /* ── SPA navigation observer ── */
